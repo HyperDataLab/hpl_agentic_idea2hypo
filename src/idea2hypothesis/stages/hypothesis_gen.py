@@ -13,6 +13,7 @@ from idea2hypothesis.pipeline.contracts import (
     normalise_prediction,
 )
 from idea2hypothesis.pipeline.models import StageContext
+from idea2hypothesis.pipeline.roles import agent_for
 from idea2hypothesis.stages.base import (
     StageFailure,
     bullet_list,
@@ -145,8 +146,9 @@ async def _generate_perspectives(
             prompt = ctx.prompts.render_role(role, **variables)
             try:
                 data, _ = await request_json(
-                    ctx, prompt, label=f"perspective {role}", validate=check_perspective
-                )
+                    ctx, prompt, label=f"perspective {role}", validate=check_perspective,
+                    llm=ctx.llm_for(agent_for(role)),
+                )  # fmt: skip
             except StageFailure as exc:
                 warnings.append(f"perspective {role} failed: {exc.message}")
                 return role, None
@@ -203,8 +205,9 @@ async def _debate(
             )
             try:
                 data, _ = await request_json(
-                    ctx, prompt, label=f"debate {role} r{r}", validate=check_perspective
-                )
+                    ctx, prompt, label=f"debate {role} r{r}", validate=check_perspective,
+                    llm=ctx.llm_for(agent_for(role)),
+                )  # fmt: skip
             except StageFailure as exc:
                 warnings.append(f"debate round {r}: {role} kept its prior position ({exc.message})")
                 return role, None

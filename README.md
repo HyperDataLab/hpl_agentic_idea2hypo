@@ -158,6 +158,9 @@ Linux and Windows (Python 3.11 and 3.13).
 * [docs/architecture.md](docs/architecture.md): layers, data flow, storage, state machine.
 * [docs/stage-contracts.md](docs/stage-contracts.md): per-stage inputs, outputs, pass conditions.
 * [docs/platform-integration.md](docs/platform-integration.md): HTTP API, events, webhooks.
+* [docs/cloudflare-architecture.md](docs/cloudflare-architecture.md): the lab deployment on Firebase
+  and Cloudflare (Worker `worker/`, engine container `Dockerfile`),
+  run-scoped model keys, per-agent models and the lab paper sources.
 * [docs/pipeline-stage-guide.md](docs/pipeline-stage-guide.md): what each stage does and why.
 * [docs/llm-reliability-benchmark.md](docs/llm-reliability-benchmark.md): rubric for comparing models.
 * [docs/migration.md](docs/migration.md): changes from the code this project was extracted from.

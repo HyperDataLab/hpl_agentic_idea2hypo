@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import os
 import re
 import shutil
 from collections.abc import Callable, Coroutine
@@ -24,15 +25,29 @@ from idea2hypothesis.api.platform_events import (
     PlatformEventLog,
     PlatformProjector,
 )
-from idea2hypothesis.api.schemas import GateAnswerRequest, RunCreateRequest
+from idea2hypothesis.api.schemas import (
+    GateAnswerRequest,
+    LlmSettingsBody,
+    RunCreateRequest,
+    RunSourcesBody,
+)
 from idea2hypothesis.api.webhooks import (
     CallbackRejected,
     DeliveryManager,
     validate_callback_url,
 )
 from idea2hypothesis.config import Config, LLMConfig
+from idea2hypothesis.literature.fulltext import GatewayFulltext
+from idea2hypothesis.literature.lab import LabGateway
+from idea2hypothesis.literature.search import build_literature
 from idea2hypothesis.llm.factory import build_llm
 from idea2hypothesis.llm.models import LLMConfigError
+from idea2hypothesis.llm.run_settings import (
+    LLMBuilder,
+    RunLLMSettings,
+    build_run_llms,
+    default_builder,
+)
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.contracts import missing_inputs, validate_stage
@@ -62,6 +77,7 @@ from idea2hypothesis.pipeline.runner import (
 from idea2hypothesis.pipeline.services import build_services
 from idea2hypothesis.pipeline.usage import MeteredLLM, UsageMeter
 from idea2hypothesis.storage.artifacts import STAGE_COUNT
+from idea2hypothesis.storage.mirror import HttpRunMirror, MirrorSync, RunMirror
 from idea2hypothesis.storage.runs import RunNotFoundError, RunStore, utc_now
 
 logger = logging.getLogger(__name__)
@@ -99,10 +115,17 @@ class RunService:
         services: Services | None = None,
         callback_transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+        llm_builder: LLMBuilder | None = None,
+        mirror: RunMirror | None = None,
+        lab_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.config = config
+        self._lab_transport = lab_transport
         self._injected = services
         self._services: Services | None = None
+        self._llm_builder = llm_builder
+        # Services built from a key the person supplied, per run; memory only, gone on restart.
+        self._run_services: dict[str, Services] = {}
         self.store = services.store if services else RunStore(config.runs_root)
         self.control = services.control if services else RunControl()
         self.log = PlatformEventLog(self.store)
@@ -116,6 +139,11 @@ class RunService:
             on_platform_closed=self._platform_closed,
         )
         self.projector.listeners.append(self.deliveries.notify)
+        if mirror is None and config.api.worker_url:
+            mirror = HttpRunMirror(
+                config.api.worker_url, os.environ.get(config.api.worker_key_env, "")
+            )
+        self.mirror = MirrorSync(self.store, mirror) if mirror is not None else None
         self._tasks: set[asyncio.Task[Any]] = set()
         self._started: dict[str, asyncio.Event] = {}
         self._create_lock = asyncio.Lock()
@@ -132,8 +160,138 @@ class RunService:
     async def emit(self, event: Event) -> None:
         """Core event sink: project to Platform events, then signal run creation."""
         await self.projector.emit(event)
+        if self.mirror is not None:
+            self.mirror.schedule(event.run_id)
         if event.type == ev.RUN_STARTED and event.run_id in self._started:
             self._started[event.run_id].set()
+        if event.type in (ev.RUN_COMPLETED, ev.RUN_CANCELLED, ev.RUN_FAILED):
+            self._run_services.pop(event.run_id, None)
+
+    def services_for_run(
+        self,
+        run_id: str | None,
+        body: LlmSettingsBody | None,
+        sources: RunSourcesBody | None = None,
+    ) -> Services:
+        """Services of a run: its model settings (``body``, else the run's own, else configured)
+        and its lab sources (``sources``, else those recorded in ``run.json``).
+
+        A run started with its own key never falls back to the configured key: after an engine
+        restart it answers ``503 LLM_KEY_REQUIRED`` until the key is sent again.
+        """
+        recorded: dict[str, Any] = {}
+        if run_id is not None:
+            if body is None and sources is None and run_id in self._run_services:
+                return self._run_services[run_id]
+            if self.store.exists(run_id):
+                recorded = self.record(run_id)
+        if body is None and recorded.get("llm_source") == "run":
+            raise ServiceError(
+                503,
+                {
+                    "code": "LLM_KEY_REQUIRED",
+                    "message": "This run uses your own model key; send it again to continue.",
+                },
+            )
+        services = self._with_run_llm(body) if body is not None else self.services()
+        if run_id is None:
+            return services
+        if sources is None and recorded.get("run_sources"):
+            sources = RunSourcesBody.model_validate(recorded["run_sources"])
+        if sources is not None:
+            gateway_id = str(recorded.get("platform_run_id") or run_id)
+            services = self._with_sources(services, gateway_id, sources)
+        self._run_services[run_id] = services
+        return services
+
+    def _with_sources(
+        self, services: Services, gateway_id: str, sources: RunSourcesBody
+    ) -> Services:
+        """Lab literature sources and full text, bound to this run's Worker routes.
+
+        ``gateway_id`` is the id the Worker knows the run by (its ``platform_run_id``).
+        """
+        if not (sources.corpus_id or sources.lab_kg or sources.sciatlas or sources.fulltext):
+            return services
+        api = self.config.api
+        if not api.worker_url:
+            raise ServiceError(
+                422,
+                {
+                    "code": "LAB_SOURCES_UNAVAILABLE",
+                    "message": "Lab sources need the Worker (api.worker_url is not set).",
+                },
+            )
+        gateway = LabGateway(
+            api.worker_url, os.environ.get(api.worker_key_env, ""), gateway_id,
+            transport=self._lab_transport,
+        )  # fmt: skip
+        extra = [
+            name
+            for name, wanted in (
+                ("paperlab_corpus", bool(sources.corpus_id)),
+                ("lab_kg", sources.lab_kg),
+                ("sciatlas", sources.sciatlas),
+            )
+            if wanted
+        ]
+        cfg = services.config
+        literature_cfg = dataclasses.replace(
+            cfg.literature,
+            sources=tuple(dict.fromkeys((*cfg.literature.sources, *extra))),
+        )
+        config = dataclasses.replace(cfg, literature=literature_cfg)
+        literature = services.literature
+        if self._injected is None and extra:
+            literature = build_literature(
+                literature_cfg, cache_root=config.cache_root, gateway=gateway,
+                corpus_id=sources.corpus_id or "",
+            )  # fmt: skip
+        return dataclasses.replace(
+            services,
+            config=config,
+            literature=literature,
+            fulltext=GatewayFulltext(gateway) if sources.fulltext else services.fulltext,
+        )
+
+    def _with_run_llm(self, body: LlmSettingsBody) -> Services:
+        if self._injected is not None and self._llm_builder is None:
+            raise ServiceError(422, "llm overrides are not available with injected services")
+        try:
+            settings = RunLLMSettings(
+                base_url=body.base_url.strip(),
+                api_key=body.api_key.get_secret_value().strip(),
+                model=body.model.strip(),
+                role_models=dict(body.role_models),
+            )
+            built = build_run_llms(
+                self.config.llm, settings, self._llm_builder or default_builder
+            )
+        except LLMConfigError as exc:
+            raise ServiceError(422, {"code": "LLM_SETTINGS_INVALID", "message": str(exc)}) from exc
+        config = dataclasses.replace(self.config, llm=built.config)
+        if self._injected is not None:
+            base = self.services()
+            return dataclasses.replace(
+                base, config=config, llm=built.llm, reviewer=built.reviewer,
+                role_llms=built.role_llms,
+            )  # fmt: skip
+        services = build_services(
+            config, llm=built.llm, reviewer=built.reviewer, events=self, store=self.store
+        )
+        services.control = self.control
+        services.role_llms = built.role_llms
+        return services
+
+    @staticmethod
+    def _llm_record(body: LlmSettingsBody | None) -> dict[str, Any]:
+        """What run.json keeps about run-scoped models: names only, never the key."""
+        if body is None:
+            return {}
+        return {
+            "llm_source": "run",
+            "llm_models": {"default": body.model, **dict(body.role_models)},
+        }
 
     def services(self) -> Services:
         """The engine services; built from configuration on first use."""
@@ -192,6 +350,8 @@ class RunService:
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         await self.deliveries.wait_idle()
+        if self.mirror is not None:
+            await self.mirror.wait_idle()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -213,23 +373,45 @@ class RunService:
 
     async def _recover_interrupted(self) -> list[str]:
         # Mirrors ``runner.recover_interrupted`` without needing LLM credentials.
-        recovered: list[str] = []
-        for run_id in self.store.list_run_ids():
-            record = self.store.read_run(run_id)
-            if record["status"] != RunStatus.RUNNING.value or self.control.is_active(run_id):
-                continue
-            self.store.update_run(
-                run_id, status=RunStatus.PAUSED.value, pause_reason="interrupted", worker=None
-            )
-            event = self.store.append_event(
-                run_id,
-                ev.RUN_PAUSED,
-                attempt=int(record["attempt"]),
-                data={"reason": "interrupted"},
-            )
-            await self.emit(event)
-            recovered.append(run_id)
-        return recovered
+        return [run_id for run_id in self.store.list_run_ids() if await self._recover_one(run_id)]
+
+    async def _recover_one(self, run_id: str) -> bool:
+        """Pause a run left ``running`` by a process that is gone; ``True`` when it was."""
+        record = self.store.read_run(run_id)
+        if record["status"] != RunStatus.RUNNING.value or self.control.is_active(run_id):
+            return False
+        self.store.update_run(
+            run_id, status=RunStatus.PAUSED.value, pause_reason="interrupted", worker=None
+        )
+        event = self.store.append_event(
+            run_id,
+            ev.RUN_PAUSED,
+            attempt=int(record["attempt"]),
+            data={"reason": "interrupted"},
+        )
+        await self.emit(event)
+        return True
+
+    async def locate(self, identifier: str) -> str:
+        """Like :meth:`resolve`, but first fetches a run missing from disk back from the mirror."""
+        try:
+            return self.resolve(identifier)
+        except ServiceError:
+            if self.mirror is None or not STAGE_RUN_ID.match(identifier):
+                raise
+        try:
+            restored = await self.mirror.restore(identifier)
+        except (httpx.HTTPError, OSError) as exc:
+            raise ServiceError(
+                503, {"code": "MIRROR_UNAVAILABLE", "message": f"Run storage unreachable: {exc}"}
+            ) from exc
+        if not restored:
+            raise ServiceError(404, "Run not found")
+        # The process that ran it is gone: a run still marked running is paused, not restarted.
+        await self._recover_one(identifier)
+        self.projector.project(identifier)
+        self.deliveries.notify(identifier)
+        return identifier
 
     async def _platform_closed(self, run_id: str) -> None:
         with contextlib.suppress(RunStateError):
@@ -302,10 +484,17 @@ class RunService:
             existing = self.store.find_by_platform(req.platform_run_id)
             if existing:
                 return self.state(existing), False
-            services = self.services()
+            # Model settings are checked before anything is claimed or written.
+            services = self.services_for_run(None, req.llm)
+            if req.sources is not None and not self.config.api.worker_url:
+                self._with_sources(services, "pending", req.sources)  # raises 422 when unusable
             run_id = self.store.claim_platform_id(req.platform_run_id, new_run_id())
             if self.store.exists(run_id):
                 return self.state(run_id), False
+            if req.sources is not None:
+                services = self._with_sources(services, req.platform_run_id, req.sources)
+            if req.llm is not None or req.sources is not None:
+                self._run_services[run_id] = services
             self.store.run_dir(run_id).mkdir(parents=True, exist_ok=True)
             self.deliveries.write_meta(
                 run_id,
@@ -325,6 +514,11 @@ class RunService:
                 budget_usd=float(req.budget_usd),
             )
             await self._start(run_pipeline(request, services), run_id)
+            extra = self._llm_record(req.llm)
+            if req.sources is not None:
+                extra["run_sources"] = req.sources.model_dump()
+            if extra:
+                self.store.update_run(run_id, **extra)
         return self.state(run_id), True
 
     async def _start(self, coro: Coroutine[Any, Any, Any], run_id: str) -> None:
@@ -355,7 +549,7 @@ class RunService:
         if gate["gate_id"] != gate_id:
             raise ServiceError(404, "Gate ID mismatch")
         answer = _core_answer(body)
-        services = self.services()
+        services = self.services_for_run(run_id, body.llm)
         try:
             result = await apply_gate_answer(run_id, gate_id, answer, services)
         except gates.GateError as exc:
@@ -371,11 +565,14 @@ class RunService:
         except RunStateError as exc:
             raise _conflict("RUN_FINISHED") from exc
 
-    async def resume(self, run_id: str) -> str:
+    async def resume(self, run_id: str, llm: LlmSettingsBody | None = None) -> str:
         record = self.record(run_id)
         status = RunStatus(record["status"])
         if status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
             raise _conflict("RUN_FINISHED")
+        if llm is not None:
+            self.services_for_run(run_id, llm)
+            self.store.update_run(run_id, **self._llm_record(llm))
         if self.control.is_active(run_id):
             self.control.clear(run_id)  # a pause that was requested but not yet taken
             return "Run resumed"
@@ -384,7 +581,7 @@ class RunService:
             and (record.get("gate") or {}).get("status") == "open"
         ):
             return "Run awaits a gate decision"
-        self.spawn(resume_pipeline(run_id, self.services()))
+        self.spawn(resume_pipeline(run_id, self.services_for_run(run_id, None)))
         return "Run resumed"
 
     async def cancel(self, run_id: str) -> str:

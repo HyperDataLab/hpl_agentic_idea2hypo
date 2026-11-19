@@ -5,11 +5,39 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 ApiStatus = Literal["running", "paused", "awaiting_review", "completed", "failed"]
 
 # -- engine runs (Platform BE) ------------------------------------------------
+
+ModelRole = Literal["theorist", "methodologist", "skeptic", "judge"]
+
+
+class LlmSettingsBody(BaseModel):
+    """The person's own OpenAI-compatible endpoint for one run; the key is kept in memory only."""
+
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: SecretStr = Field(description="Never stored, logged or returned")
+    model: str = Field(min_length=1, max_length=200)
+    role_models: dict[ModelRole, str] = Field(
+        default_factory=dict, description="Model per agent; unset agents use `model`"
+    )
+
+
+class RunSourcesBody(BaseModel):
+    """Lab sources for one run, reached through the Cloudflare Worker (``api.worker_url``)."""
+
+    corpus_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        description="PaperLab corpus used as a seed set",
+    )
+    lab_kg: bool = Field(default=False, description="Search the lab knowledge graph")
+    sciatlas: bool = Field(default=False, description="Ids from SciAtlas, records from OpenAlex")
+    fulltext: bool = Field(
+        default=False, description="Read PDFs Paper Fetch Hub stored (GROBID) in stage 6"
+    )
 
 
 class RunCreateRequest(BaseModel):
@@ -23,6 +51,10 @@ class RunCreateRequest(BaseModel):
     )
     budget_usd: Decimal = Field(default=Decimal("5.00"), gt=0, description="Budget in USD")
     callback_url: str = Field(description="Webhook base URL for event delivery")
+    llm: LlmSettingsBody | None = Field(
+        default=None, description="Run-scoped model settings; default: the configured model"
+    )
+    sources: RunSourcesBody | None = Field(default=None, description="Lab sources for this run")
 
     @field_validator("topic")
     @classmethod
@@ -57,6 +89,15 @@ class GateAnswerRequest(BaseModel):
     option_id: str
     dropped: list[str] = Field(default_factory=list)
     note: str | None = None
+    llm: LlmSettingsBody | None = Field(
+        default=None, description="Needed when the engine restarted since the run's last start"
+    )
+
+
+class ResumeRequest(BaseModel):
+    llm: LlmSettingsBody | None = Field(
+        default=None, description="Needed when the engine restarted since the run's last start"
+    )
 
 
 class EventItem(BaseModel):

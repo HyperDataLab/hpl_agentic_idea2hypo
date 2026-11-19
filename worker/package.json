@@ -1,0 +1,21 @@
+{
+  "name": "i2h-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "jose": "^6.2.16"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261020.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "wrangler": "4.161.0"
+  }
+}

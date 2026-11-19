@@ -10,3 +10,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 tools/dashboard/data.js
+runs-cloudflare-local/
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars

@@ -26,7 +26,9 @@ from idea2hypothesis.api.routes import bedrock, engine_runs, stages
 from idea2hypothesis.api.security import ServiceKeyMiddleware
 from idea2hypothesis.api.service import RunService, ServiceError
 from idea2hypothesis.config import Config, load_config
+from idea2hypothesis.llm.run_settings import LLMBuilder
 from idea2hypothesis.pipeline.models import Services
+from idea2hypothesis.storage.mirror import RunMirror
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +42,22 @@ def create_app(
     services: Services | None = None,
     callback_transport: httpx.AsyncBaseTransport | None = None,
     sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    llm_builder: LLMBuilder | None = None,
+    mirror: RunMirror | None = None,
 ) -> FastAPI:
     """Build the application.
 
-    ``services``, ``callback_transport`` and ``sleep`` let tests inject the engine ports, the
-    webhook HTTP transport and the retry sleep; by default everything comes from ``config``.
+    ``services``, ``callback_transport``, ``sleep`` and ``llm_builder`` let tests inject the
+    engine ports, the webhook HTTP transport, the retry sleep and the client built from a
+    run's own model settings; by default everything comes from ``config``.
     """
     service = RunService(
-        config, services=services, callback_transport=callback_transport, sleep=sleep
+        config,
+        services=services,
+        callback_transport=callback_transport,
+        sleep=sleep,
+        llm_builder=llm_builder,
+        mirror=mirror,
     )
 
     @asynccontextmanager

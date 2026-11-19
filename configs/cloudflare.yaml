@@ -1,0 +1,67 @@
+# Engine inside the Cloudflare Container behind i2h-worker (see docs/cloudflare-architecture.md).
+#
+# Every run brings its own model settings (the person's 9router key, typed in the app's Settings),
+# so no LLM key is configured here. The container's disk is temporary: run folders are mirrored
+# to R2 through the Worker (api.worker_url) and fetched back when needed.
+# Secrets come from the environment the Worker gives the container:
+#   I2H_SERVICE_KEY  Worker -> engine (X-Service-Key)
+#   I2H_CALLBACK_KEY engine -> Worker event delivery
+#   I2H_WORKER_KEY   engine -> Worker mirror and lab routes
+# All three are the Worker secret ENGINE_KEY.
+
+research:
+  hardware_advisory: false
+  min_relevance: 0.7
+  min_quality: 0.5
+  min_topic_score: 5.0
+  novelty_check: true
+  max_shortlist: 20
+
+llm:
+  provider: openai_compatible
+  model: ""                      # set per run
+  base_url: ""                   # set per run
+  api_key_env: I2H_LLM_API_KEY   # unset: a run without its own settings is refused (503)
+  timeout_sec: 120
+  max_retries: 4
+  retry_base_delay: 3.0
+  temperature: 0.4
+  max_tokens: 4096
+  debate_rounds: 1               # each agent answers the others once, then the judge ranks them
+
+literature:
+  sources: [openalex, semantic_scholar, arxiv]   # a run adds lab_kg, sciatlas, paperlab_corpus
+  max_results_per_query: 20
+  inter_query_delay_sec: 1.0
+  timeout_sec: 30
+  max_retries: 3
+  s2_api_key_env: S2_API_KEY
+  cache: false
+
+prompts:
+  domain: ml
+
+runtime:
+  max_retries: 2
+  retry_delay_sec: 20.0
+  concurrency: 3
+  ideation_memory: false
+
+review:
+  mode: copilot
+
+storage:
+  runs_root: /tmp/i2h/runs
+  cache_root: /tmp/i2h/cache
+
+api:
+  host: 0.0.0.0
+  port: 8080
+  service_key_env: I2H_SERVICE_KEY
+  callback_key_env: I2H_CALLBACK_KEY
+  callback_allowed_hosts: [i2h-worker.hyperdatalab.workers.dev]
+  delivery_max_attempts: 8
+  delivery_backoff_max_sec: 60
+  cors_origins: []
+  worker_url: https://i2h-worker.hyperdatalab.workers.dev/internal
+  worker_key_env: I2H_WORKER_KEY

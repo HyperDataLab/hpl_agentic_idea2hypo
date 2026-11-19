@@ -1,0 +1,37 @@
+# Local development of the Cloudflare setup: `wrangler dev` (Worker on :8787, ENGINE_URL in
+# worker/.dev.vars pointing here) and this engine in a venv:
+#   I2H_CONFIG=configs/cloudflare-local.yaml I2H_SERVICE_KEY=dev-engine-key \
+#   I2H_CALLBACK_KEY=dev-engine-key I2H_WORKER_KEY=dev-engine-key python tools/serve_api.py
+# In Docker, use http://host.docker.internal:8787/internal as worker_url instead.
+
+research:
+  hardware_advisory: false
+  max_shortlist: 20
+
+llm:
+  provider: openai_compatible
+  model: ""
+  base_url: ""
+  timeout_sec: 120
+  max_retries: 4
+  retry_base_delay: 3.0
+  debate_rounds: 1
+
+literature:
+  sources: [openalex, semantic_scholar, arxiv]
+  inter_query_delay_sec: 1.0
+
+runtime:
+  max_retries: 2
+  retry_delay_sec: 20.0
+  concurrency: 3
+
+storage:
+  runs_root: runs-cloudflare-local
+  cache_root: .cache
+
+api:
+  host: 0.0.0.0
+  port: 8080
+  callback_allowed_hosts: [localhost, 127.0.0.1, host.docker.internal]
+  worker_url: http://localhost:8787/internal

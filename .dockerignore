@@ -1,0 +1,14 @@
+.git
+.venv
+.cache
+.pytest_cache
+.ruff_cache
+runs
+runs-cloudflare-local
+tests
+tools
+docs
+worker
+.env
+.env.*
+**/__pycache__

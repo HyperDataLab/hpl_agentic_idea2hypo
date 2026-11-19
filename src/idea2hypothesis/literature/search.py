@@ -16,10 +16,16 @@ import httpx
 
 from idea2hypothesis.config import LiteratureConfig
 from idea2hypothesis.literature.dedup import deduplicate
+from idea2hypothesis.literature.lab import LabGateway
 from idea2hypothesis.literature.models import Paper, SearchReport, SourceStats
 from idea2hypothesis.literature.providers.arxiv import BASE_URL as ARXIV_URL
 from idea2hypothesis.literature.providers.arxiv import ArxivProvider
 from idea2hypothesis.literature.providers.http import ProviderError
+from idea2hypothesis.literature.providers.lab_sources import (
+    LabKgProvider,
+    PaperLabCorpusProvider,
+    SciAtlasProvider,
+)
 from idea2hypothesis.literature.providers.openalex import BASE_URL as OPENALEX_URL
 from idea2hypothesis.literature.providers.openalex import OpenAlexProvider
 from idea2hypothesis.literature.providers.semantic_scholar import BASE_URL as S2_URL
@@ -31,7 +37,15 @@ SOURCE_INFO: dict[str, tuple[str, str]] = {
     "openalex": ("OpenAlex", OPENALEX_URL),
     "semantic_scholar": ("Semantic Scholar", S2_URL),
     "arxiv": ("arXiv", ARXIV_URL),
+    "lab_kg": (
+        "Lab KG (HyperDataLab)",
+        "https://paperlab-pdf-worker.hyperdatalab.workers.dev/v1/kg",
+    ),
+    "sciatlas": ("SciAtlas (ids, via OpenAlex)", "http://sciatlas.openkg.cn"),
+    "paperlab_corpus": ("PaperLab corpus", "https://hyperdatalab-paragraph-lab.web.app"),
 }
+#: Sources that need the run's lab gateway (the Cloudflare Worker); skipped without one.
+LAB_SOURCES = ("lab_kg", "sciatlas", "paperlab_corpus")
 _MAX_STALE_SEC = 30 * 86400.0  # cached results are only a fallback when a provider fails
 
 
@@ -141,27 +155,47 @@ def build_literature(
     cache_root: Path | None = None,
     client: httpx.AsyncClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    gateway: LabGateway | None = None,
+    corpus_id: str = "",
 ) -> MultiSourceSearch:
-    """Create the configured providers; secrets are read from the named environment variables."""
+    """Create the configured providers; secrets are read from the named environment variables.
+
+    The lab sources need ``gateway`` (and ``paperlab_corpus`` a ``corpus_id``); without them they
+    are left out with a log line rather than failing the run.
+    """
     http = client or httpx.AsyncClient(timeout=cfg.timeout_sec, follow_redirects=True)
     common: dict[str, Any] = {
         "timeout": cfg.timeout_sec,
         "max_retries": cfg.max_retries,
         "sleep": sleep,
     }
+
+    def openalex() -> OpenAlexProvider:
+        return OpenAlexProvider(
+            http,
+            email=cfg.openalex_email,
+            api_key=os.environ.get(cfg.openalex_api_key_env, "")
+            if cfg.openalex_api_key_env
+            else "",
+            **common,
+        )
+
     providers: list[Provider] = []
     for name in cfg.sources:
+        if name in LAB_SOURCES and gateway is None:
+            logger.warning("literature source %s needs the Worker gateway; skipped", name)
+            continue
         if name == "openalex":
-            providers.append(
-                OpenAlexProvider(
-                    http,
-                    email=cfg.openalex_email,
-                    api_key=os.environ.get(cfg.openalex_api_key_env, "")
-                    if cfg.openalex_api_key_env
-                    else "",
-                    **common,
-                )
-            )
+            providers.append(openalex())
+        elif name == "lab_kg" and gateway is not None:
+            providers.append(LabKgProvider(gateway))
+        elif name == "sciatlas" and gateway is not None:
+            providers.append(SciAtlasProvider(gateway, openalex()))
+        elif name == "paperlab_corpus" and gateway is not None:
+            if not corpus_id:
+                logger.warning("paperlab_corpus needs a corpus id; skipped")
+                continue
+            providers.append(PaperLabCorpusProvider(gateway, corpus_id, openalex()))
         elif name == "semantic_scholar":
             providers.append(
                 SemanticScholarProvider(

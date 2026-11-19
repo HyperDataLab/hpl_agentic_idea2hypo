@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -60,12 +61,34 @@ class OpenAlexProvider:
             "per_page": str(min(limit, MAX_PER_REQUEST)),
             "select": _SELECT,
         }
+        if year_min > 0:
+            params["filter"] = f"from_publication_date:{year_min}-01-01"
+        return await self._works(params)
+
+    async def lookup(
+        self, *, openalex_ids: Sequence[str] = (), dois: Sequence[str] = ()
+    ) -> list[Paper]:
+        """Works by OpenAlex id (``W123``) or DOI, at most 50 of each per request."""
+        papers: list[Paper] = []
+        short = [i.rsplit("/", 1)[-1] for i in openalex_ids if re.fullmatch(r"(?:.*/)?W\d+", i)]
+        clean = [d for d in (normalise_doi(d) for d in dois) if d.startswith("10.")]
+        for key, values in (("openalex", short), ("doi", clean)):
+            for start in range(0, len(values), MAX_PER_REQUEST):
+                chunk = values[start : start + MAX_PER_REQUEST]
+                papers += await self._works(
+                    {
+                        "filter": f"{key}:{'|'.join(chunk)}",
+                        "per_page": str(MAX_PER_REQUEST),
+                        "select": _SELECT,
+                    }
+                )
+        return papers
+
+    async def _works(self, params: dict[str, Any]) -> list[Paper]:
         if self._email:
             params["mailto"] = self._email
         if self._api_key:
             params["api_key"] = self._api_key
-        if year_min > 0:
-            params["filter"] = f"from_publication_date:{year_min}-01-01"
         agent = (
             f"idea2hypothesis/0.1 (mailto:{self._email})" if self._email else "idea2hypothesis/0.1"
         )

@@ -128,6 +128,8 @@ async def harness(
     platform: FakePlatform | None = None,
     send_key: bool = True,
     llm_settings: dict[str, Any] | None = None,
+    llm_builder: Any = None,
+    mirror: Any = None,
     **sections: dict[str, Any],
 ) -> AsyncIterator[Harness]:
     """App + client with the lifespan running; ``tmp_path`` identifies the run storage.
@@ -139,7 +141,14 @@ async def harness(
     config = api_config(tmp_path, **sections)
     services = make_services(tmp_path, llm=llm, literature=literature, config=config)
     fake = platform or FakePlatform()
-    app = create_app(config, services=services, callback_transport=fake.transport(), sleep=no_sleep)
+    app = create_app(
+        config,
+        services=services,
+        callback_transport=fake.transport(),
+        sleep=no_sleep,
+        llm_builder=llm_builder,
+        mirror=mirror,
+    )
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         key = os.environ.get(config.api.service_key_env, "") if send_key else ""

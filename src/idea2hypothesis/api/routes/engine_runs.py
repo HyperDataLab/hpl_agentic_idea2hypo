@@ -11,6 +11,7 @@ from idea2hypothesis.api.schemas import (
     EventsBatchResponse,
     GateAnswerRequest,
     OkResponse,
+    ResumeRequest,
     RunCreateRequest,
     RunCreateResponse,
     RunStateResponse,
@@ -66,7 +67,7 @@ async def find_run(
     summary="Run state by run id or platform_run_id",
 )
 async def get_run_status(popper_run_id: str, service: RunService = Depends(get_service)) -> Any:
-    return RunStateResponse(**service.state(service.resolve(popper_run_id)))
+    return RunStateResponse(**service.state(await service.locate(popper_run_id)))
 
 
 @router.get(
@@ -80,7 +81,7 @@ async def get_run_events(
     limit: int = Query(500, ge=1, le=1000),
     service: RunService = Depends(get_service),
 ) -> EventsBatchResponse:
-    run_id = service.resolve(popper_run_id)
+    run_id = await service.locate(popper_run_id)
     rows = service.events(run_id, after_source_seq, limit)
     return EventsBatchResponse(events=[EventItem(**row) for row in rows])
 
@@ -97,7 +98,7 @@ async def submit_gate_answer(
     service: RunService = Depends(get_service),
 ) -> OkResponse:
     """``option_id``: ``approve``, ``drop`` (with ``dropped`` paper ids) or ``reject``."""
-    run_id = service.resolve(popper_run_id)
+    run_id = await service.locate(popper_run_id)
     message = await service.answer_gate(run_id, gate_id, answer)
     return OkResponse(message=message)
 
@@ -106,19 +107,26 @@ async def submit_gate_answer(
     "/runs/{popper_run_id}/pause", response_model=OkResponse, summary="Pause at a safe point"
 )
 async def pause_run(popper_run_id: str, service: RunService = Depends(get_service)) -> OkResponse:
-    await service.pause(service.resolve(popper_run_id))
+    await service.pause(await service.locate(popper_run_id))
     return OkResponse(message="Run paused")
 
 
 @router.post(
     "/runs/{popper_run_id}/resume", response_model=OkResponse, summary="Resume a paused run"
 )
-async def resume_run(popper_run_id: str, service: RunService = Depends(get_service)) -> OkResponse:
-    message = await service.resume(service.resolve(popper_run_id))
+async def resume_run(
+    popper_run_id: str,
+    body: ResumeRequest | None = None,
+    service: RunService = Depends(get_service),
+) -> OkResponse:
+    """``llm`` is needed when the run uses its own key and the engine restarted since."""
+    message = await service.resume(
+        await service.locate(popper_run_id), body.llm if body is not None else None
+    )
     return OkResponse(message=message)
 
 
 @router.post("/runs/{popper_run_id}/cancel", response_model=OkResponse, summary="Cancel a run")
 async def cancel_run(popper_run_id: str, service: RunService = Depends(get_service)) -> OkResponse:
-    message = await service.cancel(service.resolve(popper_run_id))
+    message = await service.cancel(await service.locate(popper_run_id))
     return OkResponse(message=message)

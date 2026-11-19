@@ -30,6 +30,7 @@ from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.pipeline.models import Stage
+from idea2hypothesis.pipeline.roles import ML_ROLES, ROLE_ACTORS
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_bytes_atomic
 from idea2hypothesis.storage.runs import RunStore
 
@@ -855,17 +856,8 @@ def _content_stage7(art: ArtifactStore) -> StepEvents:
 #: Perspective roles of each prompt domain (prompts/hypothesis_roles.yaml) and the Platform agent
 #: that speaks for them: the one who proposes, the one who asks how it is measured, the one who
 #: looks for how it fails.
-_ML_ROLES = {"innovator": "theorist", "pragmatist": "methodologist", "contrarian": "skeptic"}
-_ROLE_ACTORS = {
-    **_ML_ROLES,
-    # hep
-    "theorist": "theorist",
-    "phenomenologist": "methodologist",
-    "experimentalist": "skeptic",
-    # biology (experimentalist as in hep)
-    "model_builder": "theorist",
-    "fba_analyst": "methodologist",
-}
+_ML_ROLES = ML_ROLES
+_ROLE_ACTORS = ROLE_ACTORS
 #: Letter of a perspective's own hypotheses in the debate: T1 is the Theorist's first.
 _ACTOR_LETTERS = {"theorist": "T", "methodologist": "M", "skeptic": "S"}
 # Only the ML role names are engine jargon; "experimentalist" or "theorist" in a sentence is a

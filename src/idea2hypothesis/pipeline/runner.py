@@ -149,6 +149,7 @@ def build_context(
     record: dict[str, Any] | None = None,
     llm: Any = None,
     reviewer: Any = None,
+    role_llms: dict[str, Any] | None = None,
 ) -> StageContext:
     """Create a :class:`StageContext` for ``stage`` of an existing run."""
     record = record or services.store.read_run(run_id)
@@ -182,6 +183,8 @@ def build_context(
         hardware=services.hardware,
         sleep=services.sleep,
         report=report,
+        role_llms=role_llms if role_llms is not None else dict(services.role_llms),
+        fulltext=services.fulltext,
     )
 
 
@@ -420,6 +423,7 @@ async def _loop(run_id: str, services: Services) -> None:
     meter = UsageMeter.from_dict(store.read_run(run_id).get("usage"))
     llm = MeteredLLM(services.llm, meter)
     reviewer = MeteredLLM(services.reviewer, meter) if services.reviewer else None
+    role_llms = {agent: MeteredLLM(port, meter) for agent, port in services.role_llms.items()}
 
     for stage in STAGE_SEQUENCE:
         record = store.read_run(run_id)
@@ -430,7 +434,9 @@ async def _loop(run_id: str, services: Services) -> None:
 
         if not _stage_valid(services, run_id, stage, checkpoint):
             _budget_check(record, meter)
-            if not await _run_stage(run_id, services, stage, record, meter, llm, reviewer):
+            if not await _run_stage(
+                run_id, services, stage, record, meter, llm, reviewer, role_llms
+            ):
                 return
             record = store.read_run(run_id)
 
@@ -463,6 +469,7 @@ async def _run_stage(
     meter: UsageMeter,
     llm: MeteredLLM,
     reviewer: MeteredLLM | None,
+    role_llms: dict[str, MeteredLLM] | None = None,
 ) -> bool:
     """Execute one stage; returns False when the run stopped (failure)."""
     store = services.store
@@ -470,7 +477,9 @@ async def _run_stage(
     store.update_run(run_id, current_stage=int(stage))
     await _emit(services, run_id, ev.STAGE_STARTED, stage=int(stage), attempt=attempt)
     before = meter.snapshot()
-    context = build_context(run_id, stage, services, record=record, llm=llm, reviewer=reviewer)
+    context = build_context(
+        run_id, stage, services, record=record, llm=llm, reviewer=reviewer, role_llms=role_llms
+    )
     result = await execute_stage(stage, context)
     usage = meter.delta_since(before)
     store.update_run(run_id, usage=meter.snapshot())

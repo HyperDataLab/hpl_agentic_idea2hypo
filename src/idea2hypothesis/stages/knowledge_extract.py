@@ -1,9 +1,15 @@
-"""Stage 6 - KNOWLEDGE_EXTRACT: one evidence card per shortlisted paper (abstract level)."""
+"""Stage 6 - KNOWLEDGE_EXTRACT: one evidence card per shortlisted paper.
+
+A card is built from the paper's full text when the lab holds its PDF (``evidence_scope``
+``full_text``), otherwise from the abstract (``abstract``).
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from idea2hypothesis.literature.fulltext import FullText
+from idea2hypothesis.literature.providers.http import ProviderError
 from idea2hypothesis.pipeline.contracts import CARD_FIELDS, Findings, card_id_for
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.stages.base import StageFailure, compact_json, gather_limited, request_json
@@ -11,6 +17,7 @@ from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 6
 EVIDENCE_SCOPE = "abstract"
+FULLTEXT_SCOPE = "full_text"
 
 
 def check_card_fields(data: Any) -> Findings:
@@ -43,17 +50,53 @@ def render_card_markdown(card: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _extract(ctx: StageContext, paper: dict[str, Any]) -> dict[str, Any]:
+async def _fulltexts(
+    ctx: StageContext, shortlist: list[dict[str, Any]]
+) -> tuple[dict[str, FullText], list[str], list[str]]:
+    """Full text per paper id, DOIs the lab has no PDF for, and fetch errors (never fatal)."""
+    port = ctx.fulltext
+    if port is None:
+        return {}, [], []
+    found: dict[str, FullText] = {}
+    missing: list[str] = []
+    errors: list[str] = []
+
+    async def one(paper: dict[str, Any]) -> None:
+        doi = str(paper.get("doi") or "").strip()
+        if not doi:
+            return
+        await ctx.safe_point()
+        try:
+            text = await port.fetch(doi)
+        except ProviderError as exc:
+            errors.append(f"{doi}: {exc}")
+            return
+        if text is None:
+            missing.append(doi)
+        else:
+            found[str(paper["paper_id"])] = text
+
+    await gather_limited([lambda p=p: one(p) for p in shortlist], ctx.config.runtime.concurrency)
+    return found, sorted(missing), errors
+
+
+async def _extract(
+    ctx: StageContext, paper: dict[str, Any], full: FullText | None = None
+) -> dict[str, Any]:
     authors = [a.get("name", "") for a in paper.get("authors", [])[:5] if isinstance(a, dict)]
-    view = {
+    view: dict[str, Any] = {
         "paper_id": paper["paper_id"],
         "title": paper.get("title", ""),
         "authors": authors,
         "year": paper.get("year") or None,
         "venue": paper.get("venue") or None,
-        "abstract": paper.get("abstract", ""),
+        "abstract": paper.get("abstract", "") or (full.abstract if full else ""),
     }
-    prompt = ctx.prompts.render("knowledge_extract", topic=ctx.topic, paper_json=compact_json(view))
+    template, scope = "knowledge_extract", EVIDENCE_SCOPE
+    if full is not None:
+        view["sections"] = full.excerpt()
+        template, scope = "knowledge_extract_fulltext", FULLTEXT_SCOPE
+    prompt = ctx.prompts.render(template, topic=ctx.topic, paper_json=compact_json(view))
     data, _ = await request_json(
         ctx, prompt, label=f"knowledge_extract {paper['paper_id']}", validate=check_card_fields
     )
@@ -68,7 +111,7 @@ async def _extract(ctx: StageContext, paper: dict[str, Any]) -> dict[str, Any]:
         "doi": paper.get("doi") or None,
         "arxiv_id": paper.get("arxiv_id") or None,
         "url": paper.get("url") or None,
-        "evidence_scope": EVIDENCE_SCOPE,
+        "evidence_scope": scope,
         **{k: (data[k].strip() or None) if isinstance(data[k], str) else None for k in CARD_FIELDS},
         "generated_at": utc_now(),
     }
@@ -82,10 +125,11 @@ async def run(ctx: StageContext) -> list[str]:
     shortlist = ctx.artifacts.read_jsonl(5, "shortlist.jsonl")
     if not shortlist:
         raise StageFailure("EMPTY_SHORTLIST", "stage 6 needs a non-empty shortlist")
+    fulltexts, missing_dois, fulltext_errors = await _fulltexts(ctx, shortlist)
     skipped: list[dict[str, str]] = []
     papers: list[dict[str, Any]] = []
     for paper in shortlist:
-        if str(paper.get("abstract") or "").strip():
+        if str(paper.get("abstract") or "").strip() or str(paper["paper_id"]) in fulltexts:
             papers.append(paper)
         else:
             skipped.append({"paper_id": str(paper["paper_id"]), "reason": "no abstract available"})
@@ -103,7 +147,7 @@ async def run(ctx: StageContext) -> list[str]:
         nonlocal done
         card = cached.get(str(paper["paper_id"]))
         if card is None:
-            card = await _extract(ctx, paper)
+            card = await _extract(ctx, paper, fulltexts.get(str(paper["paper_id"])))
             ctx.artifacts.write_partial(STAGE, ctx.attempt, _partial_name(paper), card)
         done += 1
         await ctx.progress(
@@ -128,9 +172,18 @@ async def run(ctx: StageContext) -> list[str]:
             "schema_version": 1,
             "shortlist_size": len(shortlist),
             "cards": len(cards),
-            "evidence_scope": EVIDENCE_SCOPE,
+            "evidence_scope": FULLTEXT_SCOPE if any(
+                c["evidence_scope"] == FULLTEXT_SCOPE for c in cards
+            ) else EVIDENCE_SCOPE,
+            "full_text_cards": sum(1 for c in cards if c["evidence_scope"] == FULLTEXT_SCOPE),
+            # DOIs the lab has no PDF for: queue them in Paper Fetch Hub, then redo stage 6.
+            "fulltext_missing_dois": missing_dois,
+            "fulltext_errors": fulltext_errors,
             "skipped": skipped,
             "generated_at": utc_now(),
         },
-    )
-    return [f"{s['paper_id']}: {s['reason']}" for s in skipped]
+    )  # fmt: skip
+    warnings = [f"{s['paper_id']}: {s['reason']}" for s in skipped]
+    if fulltext_errors:
+        warnings.append(f"full text unavailable for {len(fulltext_errors)} papers; abstracts used")
+    return warnings

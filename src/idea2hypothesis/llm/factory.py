@@ -10,8 +10,12 @@ from idea2hypothesis.llm.models import LLMConfigError, LLMPort
 from idea2hypothesis.llm.openai_compatible import OpenAICompatibleLLM
 
 
-def build_llm(cfg: LLMConfig) -> LLMPort:
-    """Create the client described by ``cfg`` (raises :class:`LLMConfigError` when unusable)."""
+def build_llm(cfg: LLMConfig, *, api_key: str | None = None) -> LLMPort:
+    """Create the client described by ``cfg`` (raises :class:`LLMConfigError` when unusable).
+
+    ``api_key`` is a key supplied for one run (kept in memory only); without it the key is read
+    from the environment variable named by ``cfg.api_key_env``.
+    """
     common = {
         "fallback_models": cfg.fallback_models,
         "max_retries": cfg.max_retries,
@@ -29,7 +33,8 @@ def build_llm(cfg: LLMConfig) -> LLMPort:
             timeout_sec=cfg.timeout_sec,
             **common,
         )
-    api_key = os.environ.get(cfg.api_key_env, "") if cfg.api_key_env else ""
+    if api_key is None:
+        api_key = os.environ.get(cfg.api_key_env, "") if cfg.api_key_env else ""
     if not api_key:
         raise LLMConfigError(
             f"environment variable {cfg.api_key_env!r} (llm.api_key_env) is not set"

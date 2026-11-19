@@ -22,6 +22,8 @@ REVIEW_MODES = ("auto", "light", "copilot", "full")
 LLM_PROVIDERS = ("openai_compatible", "bedrock")
 PROMPT_DOMAINS = ("ml", "hep", "biology")
 LITERATURE_SOURCES = ("openalex", "semantic_scholar", "arxiv")
+#: Lab sources, reached through the Cloudflare Worker for one run (``api.worker_url``).
+LAB_LITERATURE_SOURCES = ("lab_kg", "sciatlas", "paperlab_corpus")
 
 
 class ConfigError(ValueError):
@@ -125,6 +127,11 @@ class ApiConfig:
     delivery_max_attempts: int = 5
     delivery_backoff_max_sec: float = 60.0
     cors_origins: tuple[str, ...] = ()
+    #: Internal base URL of the Cloudflare Worker (run-file mirror and lab services). Empty keeps
+    #: runs on local disk only and disables the lab sources and full text.
+    worker_url: str = ""
+    #: Env var holding the key sent to the Worker as ``X-Service-Key``.
+    worker_key_env: str = "I2H_WORKER_KEY"
 
 
 @dataclass(frozen=True)
@@ -298,11 +305,11 @@ def _parse_literature(data: Any) -> LiteratureConfig:
     r = _Reader(data, "literature")
     d = LiteratureConfig()
     sources = r.str_list("sources", d.sources)
+    known = LITERATURE_SOURCES + LAB_LITERATURE_SOURCES
     for source in sources:
-        if source not in LITERATURE_SOURCES:
+        if source not in known:
             raise ConfigError(
-                f"literature.sources: unknown source {source!r}, "
-                f"expected {list(LITERATURE_SOURCES)}"
+                f"literature.sources: unknown source {source!r}, expected {list(known)}"
             )
     if not sources:
         raise ConfigError("literature.sources: at least one source is required")
@@ -381,6 +388,8 @@ def _parse_api(data: Any) -> ApiConfig:
             "delivery_backoff_max_sec", d.delivery_backoff_max_sec, minimum=0.0
         ),
         cors_origins=r.str_list("cors_origins", d.cors_origins),
+        worker_url=r.str("worker_url", d.worker_url),
+        worker_key_env=r.str("worker_key_env", d.worker_key_env),
     )
     r.finish()
     return cfg

@@ -297,6 +297,36 @@ stages:
       Paper:
       {{paper_json}}
 
+  knowledge_extract_fulltext:
+    json_mode: true
+    max_tokens: 3072
+    system: |
+      You extract high-signal evidence cards from a single paper. You see its metadata, abstract
+      and the body sections of its full text (possibly cut short), so you must not claim anything
+      that is not stated there.
+    user: |
+      Extract a structured knowledge card for this paper in the context of the research topic.
+
+      Topic: {{topic}}
+      {{domain_guidance}}
+
+      Rules:
+      - problem: the problem the paper addresses.
+      - method: the approach, model or protocol, as the methods section describes it.
+      - data: datasets, cohorts, sample sizes or experimental inputs the text names.
+      - metrics: the evaluation measures the text names.
+      - findings: the key results, with the numbers the results section reports.
+      - limitations: limitations the paper states (often in the discussion) or clearly implies.
+      - Any field the text does not support MUST be null. Do not fill it with generic text.
+      - Prefer what the sections say over the abstract when they differ, and keep numbers exact.
+
+      {{> json_rules}}
+      Schema:
+      {"problem": "...", "method": "...", "data": null, "metrics": null, "findings": "...", "limitations": null}
+
+      Paper:
+      {{paper_json}}
+
   synthesis:
     json_mode: true
     max_tokens: 8192

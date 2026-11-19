@@ -9,6 +9,7 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Any
 
 from idea2hypothesis.config import Config
+from idea2hypothesis.literature.fulltext import FulltextPort
 from idea2hypothesis.literature.models import LiteraturePort
 from idea2hypothesis.llm.models import LLMPort
 from idea2hypothesis.pipeline.control import RunControl
@@ -139,6 +140,10 @@ class Services:
     events: EventSink | None = None
     reviewer: LLMPort | None = None
     memory: IdeationMemory | None = None
+    #: Client per stage-8 agent (``theorist``, ``methodologist``, ``skeptic``); others use ``llm``.
+    role_llms: dict[str, LLMPort] = field(default_factory=dict)
+    #: Full text of shortlisted papers (stage 6); ``None`` reads abstracts only.
+    fulltext: FulltextPort | None = None
     control: RunControl = field(default_factory=RunControl)
     hardware: Callable[[], HardwareProfile] | None = None
     sleep: Sleep = asyncio.sleep
@@ -168,6 +173,12 @@ class StageContext:
     report: Report | None = None
     #: Which execution of the stage this is (0 first; a transient LLM error starts another).
     try_index: int = 0
+    role_llms: dict[str, LLMPort] = field(default_factory=dict)
+    fulltext: FulltextPort | None = None
+
+    def llm_for(self, agent: str | None) -> LLMPort:
+        """The client of a stage-8 agent; the main client when the agent has none of its own."""
+        return self.role_llms.get(agent or "", self.llm)
 
     async def safe_point(self) -> None:
         """Raise :class:`RunInterrupted` if a pause or cancel was requested."""
