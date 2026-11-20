@@ -2,6 +2,7 @@ import { Container, getContainer } from '@cloudflare/containers';
 import { createRemoteJWKSet } from 'jose';
 import { handle, type Bucket, type Fetch } from './app';
 import { SECURETOKEN_JWKS, verifyFirebaseToken } from './auth';
+import { Store, type Database } from './store';
 
 export { RunObject } from './runDo';
 
@@ -9,6 +10,8 @@ interface Env {
   RUN: DurableObjectNamespace;
   ENGINE: DurableObjectNamespace;
   BUCKET: Bucket;
+  /** Projects, members and run records (migrations/). */
+  DB: Database;
   FIREBASE_PROJECT_ID: string;
   ALLOWED_DOMAIN: string;
   ALLOWED_ORIGINS: string;
@@ -40,23 +43,6 @@ export class EngineContainer extends Container<Env> {
 }
 
 const jwks = createRemoteJWKSet(new URL(SECURETOKEN_JWKS));
-const projectReads = new Map<string, { ok: boolean; until: number }>();
-
-async function canReadProject(env: Env, projectId: string, token: string): Promise<boolean> {
-  // Firestore rules decide who belongs to a project: reading it with the person's token asks them.
-  const cacheKey = `${token.slice(-24)}:${projectId}`;
-  const cached = projectReads.get(cacheKey);
-  if (cached && cached.until > Date.now()) return cached.ok;
-  const response = await fetch(
-    `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/projects/${encodeURIComponent(projectId)}?mask.fieldPaths=name`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  const ok = response.ok;
-  projectReads.set(cacheKey, { ok, until: Date.now() + 60_000 });
-  if (projectReads.size > 5000) projectReads.clear();
-  return ok;
-}
-
 function engineFetch(env: Env): Fetch {
   if (env.ENGINE_URL) {
     const base = env.ENGINE_URL.replace(/\/+$/, '');
@@ -73,7 +59,8 @@ export default {
       {
         allowedOrigins: env.ALLOWED_ORIGINS.split(',').map((origin) => origin.trim()),
         verifyToken: (token) => verifyFirebaseToken(token, jwks, env.FIREBASE_PROJECT_ID, env.ALLOWED_DOMAIN),
-        canReadProject: (projectId, token) => canReadProject(env, projectId, token),
+        store: new Store(env.DB),
+        allowedDomain: env.ALLOWED_DOMAIN,
         run: (runId) => {
           const stub = env.RUN.get(env.RUN.idFromName(runId));
           return (path, init) => stub.fetch(new Request(`http://run${path}`, init));
@@ -84,6 +71,7 @@ export default {
         engineKey: env.ENGINE_KEY,
         internalBase: env.INTERNAL_BASE_URL.replace(/\/+$/, ''),
         newId: () => `run-${crypto.randomUUID()}`,
+        newProjectId: () => `prj-${crypto.randomUUID()}`,
         wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         keepEngineAwake: () => ctx.waitUntil(engine('/api/health').catch(() => undefined)),
       },

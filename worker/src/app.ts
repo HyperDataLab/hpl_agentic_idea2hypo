@@ -1,7 +1,12 @@
 // Request handling with injected dependencies, so tests need no Cloudflare runtime.
 //
-// Public routes (the app; Firebase ID token of a verified @hyperdatalab.org Google account, and the
-// project must be readable by that account in Firestore):
+// Public routes (the app; Firebase ID token of a verified @hyperdatalab.org Google account; a project and its
+// runs are reached only by its members, kept in D1 — see store.ts):
+//   GET  /v1/projects                              the caller's projects
+//   POST /v1/projects                              create one (the caller owns it)
+//   GET|PATCH|DELETE /v1/projects/:p               read, edit (owner: owner_email, delete)
+//   POST /v1/projects/:p/members, DELETE /v1/projects/:p/members/:email   (owner only)
+//   GET  /v1/projects/:p/runs                      the project's runs, newest first
 //   POST /v1/projects/:p/runs                      start a run
 //   GET  /v1/projects/:p/runs/:r                   state
 //   GET  /v1/projects/:p/runs/:r/events            SSE (Accept: text/event-stream) or a JSON page
@@ -12,9 +17,10 @@
 //   POST /internal/runs/:r/events                  event delivery (DeliveryManager)
 //   GET|PUT /internal/runs/:engineRunId/files[/<path>]   run-file mirror in R2
 //   *    /internal/runs/:r/lab/<route>             lab services with the newest token of the run
-import { sameSecret, NotAllowedError, type Identity } from './auth';
+import { emailAllowed, sameSecret, NotAllowedError, type Identity } from './auth';
 import { doiKey } from './doiKey';
 import { FINISHED, type RunMeta } from './runLog';
+import { PROJECT_STATUSES, normalEmail, type ProjectStatus, type Store } from './store';
 
 export interface StoredObject {
   arrayBuffer(): Promise<ArrayBuffer>;
@@ -41,8 +47,10 @@ export type Fetch = (path: string, init?: RequestInit) => Promise<Response>;
 export interface Deps {
   allowedOrigins: string[];
   verifyToken(token: string): Promise<Identity>;
-  /** True when this person may read the project document (Firestore rules decide). */
-  canReadProject(projectId: string, token: string): Promise<boolean>;
+  /** Projects, members and run records (D1). */
+  store: Store;
+  /** The lab's email domain: only its accounts can be added to a project. */
+  allowedDomain: string;
   run(runId: string): Fetch;
   engine: Fetch;
   /** PaperLab's worker, called with a person's token. */
@@ -52,6 +60,7 @@ export interface Deps {
   /** This Worker's internal base URL as the engine reaches it, e.g. https://i2h-worker…/internal. */
   internalBase: string;
   newId(): string;
+  newProjectId(): string;
   wait?(ms: number): Promise<void>;
   keepEngineAwake?(): void;
 }
@@ -77,7 +86,7 @@ function cors(origin: string | null, allowed: string[]): Record<string, string> 
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': 'authorization, content-type, last-event-id',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
@@ -162,6 +171,15 @@ async function startRun(deps: Deps, projectId: string, who: Identity, request: R
   }
   const started = (await response.json()) as { popper_run_id: string; status: string };
   await stub('/meta', { method: 'PATCH', body: JSON.stringify({ engineRunId: started.popper_run_id }) });
+  await deps.store.insertRun({
+    runId,
+    projectId,
+    topic: typeof body.topic === 'string' ? body.topic : '',
+    reviewMode: typeof body.review_mode === 'string' ? body.review_mode : 'light',
+    domains: Array.isArray(body.domains) ? body.domains.map(String) : [],
+    status: started.status,
+    createdBy: who.email,
+  });
   return json(201, { run_id: runId, status: started.status });
 }
 
@@ -179,7 +197,25 @@ async function runState(deps: Deps, meta: RunMeta & { lastSeq: number }) {
       cost = state.cost_usd;
     }
   }
-  return json(200, { run_id: meta.runId, status, message, cost_usd: cost, last_seq: meta.lastSeq });
+  // The run list reads D1: keep it in step with what the run says now.
+  await deps.store
+    .updateRun(meta.runId, {
+      status,
+      message,
+      lastSeq: meta.lastSeq,
+      ...(cost !== null && Number.isFinite(Number(cost)) ? { costUsd: Number(cost) } : {}),
+    })
+    .catch(() => undefined);
+  // With the record from the run list, so the app needs one call to show a run.
+  const record = await deps.store.getRun(meta.runId).catch(() => null);
+  return json(200, {
+    ...(record ?? {}),
+    run_id: meta.runId,
+    status,
+    message,
+    cost_usd: cost,
+    last_seq: meta.lastSeq,
+  });
 }
 
 async function control(deps: Deps, meta: RunMeta, action: string, request: Request, gateId?: string) {
@@ -209,14 +245,104 @@ async function artifact(deps: Deps, meta: RunMeta, path: string) {
   });
 }
 
+function text(value: unknown, field: string, max: number, required = false): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== 'string') throw new HttpError(400, 'bad_request', `${field} must be text`);
+  const trimmed = value.trim();
+  if (required && !trimmed) throw new HttpError(400, 'bad_request', `${field} is required`);
+  if (trimmed.length > max) throw new HttpError(400, 'bad_request', `${field} is longer than ${max} characters`);
+  return trimmed;
+}
+
+function projectName(value: unknown, required: boolean): string | undefined {
+  const name = text(value, 'name', 200, required);
+  if (name !== undefined && name.length < 3)
+    throw new HttpError(400, 'bad_request', 'name must have at least 3 characters');
+  return name;
+}
+
+async function projects(deps: Deps, request: Request, who: Identity): Promise<Response> {
+  if (request.method === 'GET') return json(200, { projects: await deps.store.listProjects(who.email) });
+  if (request.method !== 'POST') throw new HttpError(405, 'method_not_allowed');
+  const body = await readJson(request);
+  const created = await deps.store.createProject({
+    id: deps.newProjectId(),
+    name: projectName(body.name, true) as string,
+    description: text(body.description, 'description', 2000) ?? '',
+    owner: who.email,
+  });
+  return json(201, created);
+}
+
+async function members(deps: Deps, request: Request, projectId: string, owner: string, member?: string) {
+  if (request.method === 'POST' && !member) {
+    const email = text((await readJson(request)).email, 'email', 320, true) as string;
+    if (!emailAllowed(email, deps.allowedDomain))
+      throw new HttpError(400, 'bad_request', `only @${deps.allowedDomain} accounts can be members`);
+    await deps.store.addMember(projectId, email);
+  } else if (request.method === 'DELETE' && member) {
+    const email = normalEmail(decodeURIComponent(member));
+    if (email === owner) throw new HttpError(409, 'owner', 'the owner stays a member');
+    await deps.store.removeMember(projectId, email);
+  } else throw new HttpError(405, 'method_not_allowed');
+  return json(200, await deps.store.getProject(projectId));
+}
+
+async function project(deps: Deps, request: Request, who: Identity, projectId: string, rest: string[]) {
+  const found = await deps.store.getProject(projectId);
+  if (!found) throw new HttpError(404, 'not_found', 'project not found');
+  const me = normalEmail(who.email);
+  if (!found.member_emails.includes(me)) throw new HttpError(403, 'forbidden', 'no access to this project');
+  const owner = found.owner_email === me;
+  const [kind, member, ...extra] = rest;
+  if (kind === 'members' && !extra.length) {
+    if (!owner) throw new HttpError(403, 'forbidden', 'only the owner manages members');
+    return members(deps, request, projectId, found.owner_email, member);
+  }
+  if (kind) throw new HttpError(404, 'not_found');
+  if (request.method === 'GET') return json(200, found);
+  if (request.method === 'DELETE') {
+    if (!owner) throw new HttpError(403, 'forbidden', 'only the owner deletes a project');
+    await deps.store.deleteProject(projectId);
+    return new Response(null, { status: 204 });
+  }
+  if (request.method !== 'PATCH') throw new HttpError(405, 'method_not_allowed');
+  const body = await readJson(request);
+  const fields: { name?: string; description?: string; status?: ProjectStatus; owner_email?: string } = {};
+  const name = projectName(body.name, false);
+  if (name !== undefined) fields.name = name;
+  const description = text(body.description, 'description', 2000);
+  if (description !== undefined) fields.description = description;
+  if (body.status !== undefined) {
+    if (!PROJECT_STATUSES.includes(body.status as ProjectStatus))
+      throw new HttpError(400, 'bad_request', `status is one of ${PROJECT_STATUSES.join(', ')}`);
+    fields.status = body.status as ProjectStatus;
+  }
+  if (body.owner_email !== undefined) {
+    if (!owner) throw new HttpError(403, 'forbidden', 'only the owner hands the project over');
+    const next = text(body.owner_email, 'owner_email', 320, true) as string;
+    if (!found.member_emails.includes(normalEmail(next)))
+      throw new HttpError(400, 'bad_request', 'the new owner must be a member');
+    fields.owner_email = next;
+  }
+  await deps.store.updateProject(projectId, fields);
+  return json(200, await deps.store.getProject(projectId));
+}
+
 async function publicRoute(deps: Deps, request: Request, parts: string[]): Promise<Response> {
-  // parts: ['v1', 'projects', p, 'runs', r?, action?, gateId?]
+  // parts: ['v1', 'projects', p?, 'runs' | 'members'?, r?, action?, gateId?]
   const [, , projectId, runs, runId, action, ...rest] = parts;
-  if (runs !== 'runs' || !projectId || !ID.test(projectId)) throw new HttpError(404, 'not_found');
+  if (projectId !== undefined && !ID.test(projectId)) throw new HttpError(404, 'not_found');
   const who = await caller(deps, request);
-  if (!(await deps.canReadProject(projectId, who.token)))
+  if (!projectId) return projects(deps, request, who);
+  if (runs !== 'runs') return project(deps, request, who, projectId, parts.slice(3));
+  if (!(await deps.store.isMember(projectId, who.email)))
     throw new HttpError(403, 'forbidden', 'no access to this project');
   if (!runId) {
+    if (request.method === 'GET') {
+      const limit = Number(new URL(request.url).searchParams.get('limit') ?? 100) || 100;
+      return json(200, { runs: await deps.store.listRuns(projectId, limit) });
+    }
     if (request.method !== 'POST') throw new HttpError(405, 'method_not_allowed');
     return startRun(deps, projectId, who, request);
   }

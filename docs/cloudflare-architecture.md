@@ -7,10 +7,11 @@ is the only public API; Firebase serves the app and holds the project list.
 ```text
 Browser (Next.js static export of hpl_agentic_platform_fe, Firebase Hosting hyperdatalab-idea2hypo)
   │  Google sign-in, verified @hyperdatalab.org only (Firebase Auth) → ID token
-  │  Firestore: projects/{id}, projects/{id}/runs/{runId}   (rules: hpl_agentic_platform_fe/firestore.rules)
   ▼
-i2h-worker (worker/)                         Authorization: Bearer <ID token>; project must be
-  ├─ RunObject (Durable Object per run)      readable by that account in Firestore
+i2h-worker (worker/)                         Authorization: Bearer <ID token>; the caller must be a
+  ├─ D1 `i2h` (worker/migrations)            member of the project (project_members)
+  │    projects, project_members, runs: the project list, its members and its run list
+  ├─ RunObject (Durable Object per run)
   │    event log (SQLite), live SSE, newest token of a follower (memory only)
   ├─ EngineContainer (Dockerfile, configs/cloudflare.yaml)
   │    FastAPI engine; one instance for every run
@@ -40,8 +41,14 @@ project). Errors are `{ "error": code, "message": text }`.
 
 | Method | Route | Body / answer |
 | --- | --- | --- |
+| GET | `/v1/projects` | `{projects: Project[]}`, the caller's projects, newest first. `Project` is `{id, name, description, owner_email, member_emails, status: researching\|completed\|archived, created_at, updated_at}` |
+| POST | `/v1/projects` | `{name (3–200), description?}` → `201 Project`; the caller owns it and is its first member |
+| GET / PATCH / DELETE | `/v1/projects/:p` | members read and edit `{name?, description?, status?}`; only the owner sends `owner_email` (a member) or deletes (`204`, runs go with it) |
+| POST | `/v1/projects/:p/members` | owner only: `{email}` of a verified-domain account → `Project` |
+| DELETE | `/v1/projects/:p/members/:email` | owner only; the owner can't be removed (`409`) → `Project` |
+| GET | `/v1/projects/:p/runs?limit=` | `{runs: [{run_id, project_id, topic, review_mode, domains, status, message, last_seq, cost_usd, created_by, created_at, updated_at}]}`, newest first; written by the Worker at start and kept in step by `GET …/runs/:r` and the run's Durable Object |
 | POST | `/v1/projects/:p/runs` | `{topic, domains?, review_mode?, budget_usd?, llm: {base_url, api_key, model, role_models?: {theorist?, methodologist?, skeptic?, judge?}}, sources?: {corpus_id?, lab_kg?, sciatlas?, fulltext?}}` → `201 {run_id, status}` |
-| GET | `/v1/projects/:p/runs/:r` | `{run_id, status, message, cost_usd, last_seq}`; `status` is `starting`, `running`, `paused`, `awaiting_review`, `completed` or `failed` |
+| GET | `/v1/projects/:p/runs/:r` | `{run_id, status, message, cost_usd, last_seq}` plus the run list record (`topic, review_mode, domains, created_by, created_at, …`); `status` is `starting`, `running`, `paused`, `awaiting_review`, `completed` or `failed` |
 | GET | `/v1/projects/:p/runs/:r/events` | `Accept: text/event-stream`: SSE from `after` / `Last-Event-ID` (`event: run-event`, `id` = `seq`; `event: run-ended` when the run is over; `: keep-alive` every 20 s). Otherwise `?after=&limit=` → `{events, last_seq}` |
 | POST | `/v1/projects/:p/runs/:r/pause`, `/cancel` | — |
 | POST | `/v1/projects/:p/runs/:r/resume` | `{llm?}` |
@@ -89,12 +96,14 @@ route that names a run missing from disk fetches it back first (`RunService.loca
 
 ## Deploy (owner)
 
-1. Firebase: create project `hyperdatalab-idea2hypo` (Spark), enable Google sign-in and Firestore.
-   Rules, indexes and Hosting are deployed from `hpl_agentic_platform_fe` (`firebase.json` there).
+1. Firebase: create project `hyperdatalab-idea2hypo` (Spark) and enable Google sign-in. Firebase only signs
+   people in and hosts the app; Hosting is deployed from `hpl_agentic_platform_fe` (`firebase.json` there).
 2. PaperLab: add `hyperdatalab-idea2hypo` to `ACCEPTED_PROJECT_IDS` in `paper-lab/worker/wrangler.toml`
    (its routes accept this app's tokens) and deploy that worker.
 3. Worker (Workers Paid plan, Docker for the image build), from `worker/`:
-   `npm ci`, `npx wrangler secret put ENGINE_KEY` (and `S2_API_KEY` if any), `npx wrangler deploy`.
+   `npm ci`; once, `npx wrangler d1 create i2h` and put its `database_id` in `wrangler.toml`;
+   `npx wrangler d1 migrations apply i2h --remote` (again after a new migration);
+   `npx wrangler secret put ENGINE_KEY` (and `S2_API_KEY` if any), `npx wrangler deploy`.
 4. App: build the static export of `hpl_agentic_platform_fe` with `NEXT_PUBLIC_I2H_WORKER_URL` and
    deploy Hosting from that repo.
 

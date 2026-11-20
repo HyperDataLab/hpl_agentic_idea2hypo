@@ -11,6 +11,7 @@ import {
   type RunEnvelope,
   type RunMeta,
 } from './runLog';
+import { Store, type Database } from './store';
 
 const HEARTBEAT_MS = 20_000;
 /** A token is not handed out in its last minute. */
@@ -49,8 +50,8 @@ class SqlLogStore implements LogStore {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-/** The run object needs no binding of its own. */
-type RunEnv = Record<string, unknown>;
+/** The run object writes its status to the project's run list (D1) when it changes. */
+type RunEnv = { DB?: Database };
 
 export class RunObject extends DurableObject<RunEnv> {
   private readonly log: RunLog;
@@ -107,6 +108,7 @@ export class RunObject extends DurableObject<RunEnv> {
     if (!this.log.meta()) return json(404, { error: 'not_found' });
     const body = (await request.json().catch(() => null)) as { events?: unknown[] } | null;
     if (!body || !Array.isArray(body.events)) return json(400, { error: 'bad_request' });
+    const before = this.log.meta()?.status;
     let fresh: RunEnvelope[];
     try {
       fresh = this.log.ingest(body.events);
@@ -115,8 +117,18 @@ export class RunObject extends DurableObject<RunEnv> {
       return json(400, { error: 'malformed_event' });
     }
     await this.broadcast(fresh.map(sseFrame).join(''));
+    await this.record(before);
     if (FINISHED.has(this.log.meta()?.status ?? 'running')) await this.endStreams();
     return json(200, { data: { last_source_seq: this.log.lastSeq() } });
+  }
+
+  /** The run list (D1) follows the run's status; one write per change, not per event. */
+  private async record(before: string | undefined): Promise<void> {
+    const meta = this.log.meta();
+    if (!meta || !this.env.DB || meta.status === before) return;
+    await new Store(this.env.DB)
+      .updateRun(meta.runId, { status: meta.status, message: meta.message, lastSeq: this.log.lastSeq() })
+      .catch((error: unknown) => console.error('run list update failed', error instanceof Error ? error.message : error));
   }
 
   private stream(after: number): Response {

@@ -3,6 +3,8 @@ import { handle, type Bucket, type Deps, type Fetch } from './app';
 import { NotAllowedError } from './auth';
 import { doiKey } from './doiKey';
 import { MemoryLogStore, RunLog } from './runLog';
+import { Store } from './store';
+import { sqliteDatabase } from './testDb';
 import vectors from './doi-vectors.json';
 
 const ORIGIN = 'https://hyperdatalab-idea2hypo.web.app';
@@ -79,6 +81,17 @@ let bucket: ReturnType<typeof fakeBucket>;
 let engineCalls: { path: string; init?: RequestInit }[];
 let paperlabCalls: { path: string; init?: RequestInit }[];
 let deps: Deps;
+let db: ReturnType<typeof sqliteDatabase>;
+
+/** A project with its members, written straight into the database. */
+function seedProject(id: string, owner: string, members: string[] = []) {
+  const now = '2026-11-20T00:00:00.000Z';
+  db.raw
+    .prepare('INSERT INTO projects (id, name, description, owner_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, `Project ${id}`, '', owner, now, now);
+  for (const email of [owner, ...members])
+    db.raw.prepare('INSERT INTO project_members (project_id, email, added_at) VALUES (?, ?, ?)').run(id, email, now);
+}
 
 beforeEach(() => {
   runs = fakeRuns();
@@ -86,6 +99,10 @@ beforeEach(() => {
   engineCalls = [];
   paperlabCalls = [];
   let n = 0;
+  let p = 0;
+  db = sqliteDatabase();
+  seedProject('proj-1', 'a@hyperdatalab.org');
+  seedProject('proj-9', 'b@hyperdatalab.org', ['a@hyperdatalab.org']);
   deps = {
     allowedOrigins: [ORIGIN],
     verifyToken: async (token) => {
@@ -93,7 +110,8 @@ beforeEach(() => {
       if (token === OTHER_DOMAIN) throw new NotAllowedError('domain');
       throw new Error('bad');
     },
-    canReadProject: async (projectId) => projectId === 'proj-1',
+    store: new Store(db),
+    allowedDomain: 'hyperdatalab.org',
     run: runs.run,
     engine: async (path, init) => {
       engineCalls.push({ path, init });
@@ -111,6 +129,7 @@ beforeEach(() => {
     engineKey: KEY,
     internalBase: 'https://i2h.test/internal',
     newId: () => `run-${(n += 1)}`,
+    newProjectId: () => `prj-${(p += 1)}xx`,
   };
 });
 
@@ -168,7 +187,7 @@ describe('public routes', () => {
       body: JSON.stringify({ events: [{ source_seq: 1, type: 'run.started', payload: {} }] }),
     });
     const state = await (await call('/v1/projects/proj-1/runs/run-1', { token: GOOD })).json();
-    expect(state).toEqual({ run_id: 'run-1', status: 'running', message: null, cost_usd: null, last_seq: 1 });
+    expect(state).toMatchObject({ run_id: 'run-1', status: 'running', message: null, cost_usd: null, last_seq: 1 });
     const page = (await (
       await call('/v1/projects/proj-1/runs/run-1/events?after=0&format=json', { token: GOOD })
     ).json()) as { events: { seq: number }[] };
@@ -201,7 +220,6 @@ describe('public routes', () => {
 
   it('hides a run from another project', async () => {
     await start();
-    deps.canReadProject = async () => true;
     expect((await call('/v1/projects/proj-9/runs/run-1', { token: GOOD })).status).toBe(404);
   });
 
