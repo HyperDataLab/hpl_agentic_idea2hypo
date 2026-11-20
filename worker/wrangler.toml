@@ -17,12 +17,12 @@ INTERNAL_BASE_URL = "https://i2h-worker.hyperdatalab.workers.dev/internal"
 #   npx wrangler secret put S2_API_KEY      optional, Semantic Scholar
 
 # The lab's shared bucket: this Worker writes under i2h/ and reads Paper Fetch Hub's papers/.
-# Projects, members and run records. Create once: npx wrangler d1 create i2h, put its id here, then
+# Projects, members and run records. Created 2026-11-20 on the HyperDataLab account (APAC). After a new migration:
 # npx wrangler d1 migrations apply i2h --remote
 [[d1_databases]]
 binding = "DB"
 database_name = "i2h"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "f5fc55d8-d8bf-47d5-a444-741a6be28fea"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
