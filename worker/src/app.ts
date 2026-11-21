@@ -144,8 +144,66 @@ async function runMeta(deps: Deps, runId: string): Promise<RunMeta & { lastSeq: 
 
 const RUN_FIELDS = ['topic', 'domains', 'review_mode', 'budget_usd', 'llm', 'sources'] as const;
 
+const INTENT_KINDS = ['test', 'compare', 'explain', 'explore_dataset'] as const;
+
+function bad(message: string): never {
+  throw new HttpError(400, 'bad_request', message);
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function caseText(value: unknown, field: string, min: number, max: number): string {
+  if (typeof value !== 'string') return bad(`${field} must be text`);
+  const trimmed = value.trim();
+  if (trimmed.length < min) return bad(`${field} must have at least ${min} characters`);
+  if (trimmed.length > max) return bad(`${field} is longer than ${max} characters`);
+  return trimmed;
+}
+
+function caseList(value: unknown, field: string, maxItems: number): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return bad(`${field} must be a list`);
+  if (value.length > maxItems) return bad(`${field} has more than ${maxItems} items`);
+  return value;
+}
+
+/** The user's case for a run (intent, context, constraints, references), checked and trimmed; nothing is invented. */
+export function parseCase(value: unknown) {
+  if (!isObject(value)) return bad('case must be an object');
+  const intent = value.intent;
+  if (!isObject(intent)) return bad('case.intent is required');
+  if (!INTENT_KINDS.includes(intent.kind as (typeof INTENT_KINDS)[number]))
+    return bad(`case.intent.kind is one of ${INTENT_KINDS.join(', ')}`);
+  const parsed: {
+    intent: { kind: string; text: string };
+    context?: string;
+    constraints?: string[];
+    references?: { citation: string }[];
+  } = { intent: { kind: intent.kind as string, text: caseText(intent.text, 'case.intent.text', 12, 500) } };
+  if (value.context !== undefined) {
+    if (typeof value.context !== 'string') return bad('case.context must be text');
+    const context = caseText(value.context, 'case.context', 0, 4000);
+    if (context) parsed.context = context;
+  }
+  const constraints = caseList(value.constraints, 'case.constraints', 20)
+    .map((item) => caseText(item, 'case.constraints item', 0, 500))
+    .filter(Boolean);
+  if (constraints.length) parsed.constraints = constraints;
+  const references = caseList(value.references, 'case.references', 30).map((item) => {
+    if (!isObject(item)) return bad('case.references items must be objects');
+    return { citation: caseText(item.citation, 'case.references citation', 3, 500) };
+  });
+  if (references.length) parsed.references = references;
+  return parsed;
+}
+
 async function startRun(deps: Deps, projectId: string, who: Identity, request: Request) {
   const body = await readJson(request);
+  // Checked before the run exists, so a bad case leaves nothing behind. The run record (D1) has no column
+  // for it, so it is only forwarded to the engine, which keeps it with the run.
+  const runCase = body.case === undefined || body.case === null ? undefined : parseCase(body.case);
   const runId = deps.newId();
   const stub = deps.run(runId);
   await stub('/init', {
@@ -157,6 +215,7 @@ async function startRun(deps: Deps, projectId: string, who: Identity, request: R
     callback_url: `${deps.internalBase}/runs/${runId}`,
   };
   for (const key of RUN_FIELDS) if (key in body) engineBody[key] = body[key];
+  if (runCase) engineBody.case = runCase;
   const response = await deps.engine('/runs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Service-Key': deps.engineKey },

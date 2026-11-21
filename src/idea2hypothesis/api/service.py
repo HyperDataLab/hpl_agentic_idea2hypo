@@ -264,9 +264,7 @@ class RunService:
                 model=body.model.strip(),
                 role_models=dict(body.role_models),
             )
-            built = build_run_llms(
-                self.config.llm, settings, self._llm_builder or default_builder
-            )
+            built = build_run_llms(self.config.llm, settings, self._llm_builder or default_builder)
         except LLMConfigError as exc:
             raise ServiceError(422, {"code": "LLM_SETTINGS_INVALID", "message": str(exc)}) from exc
         config = dataclasses.replace(self.config, llm=built.config)
@@ -505,9 +503,12 @@ class RunService:
                     "created_at": utc_now(),
                 },
             )
+            case = req.case.model_dump() if req.case is not None else None
             request = RunRequest(
                 topic=req.topic,
                 domains=tuple(req.domains),
+                constraints=tuple(case["constraints"]) if case else (),
+                case=case,
                 review_mode=req.review_mode,
                 run_id=run_id,
                 platform_run_id=req.platform_run_id,

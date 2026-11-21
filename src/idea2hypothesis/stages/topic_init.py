@@ -8,7 +8,7 @@ from typing import Any
 from idea2hypothesis.pipeline.contracts import check_goal
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.resources.hardware import detect_hardware
-from idea2hypothesis.stages.base import StageFailure, bullet_list, request_json
+from idea2hypothesis.stages.base import StageFailure, bullet_list, case_block, request_json
 from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 1
@@ -93,6 +93,7 @@ async def run(ctx: StageContext) -> list[str]:
         topic=ctx.topic,
         domains=bullet_list(ctx.domains, "general"),
         constraints=bullet_list(ctx.constraints),
+        case_block=case_block(ctx.case),
         memory_context=memory_context(ctx),
         feedback=ctx.feedback,
     )

@@ -8,9 +8,11 @@ import pytest
 from idea2hypothesis.prompts import DOMAINS, PromptError, PromptLoader
 
 STAGE_VARIABLES = {
-    "topic_init": dict(topic="t", domains="d", constraints="c", memory_context="", feedback=""),
+    "topic_init": dict(
+        topic="t", domains="d", constraints="c", case_block="", memory_context="", feedback=""
+    ),
     "topic_evaluation": dict(topic="t", goal_json="{}"),
-    "problem_decompose": dict(topic="t", goal_json="{}", feedback=""),
+    "problem_decompose": dict(topic="t", case_block="", goal_json="{}", feedback=""),
     "search_strategy": dict(topic="t", problem_tree_json="{}", feedback="", year_hint=""),
     "literature_screen": dict(
         topic="t", domains="d", min_relevance=0.7, min_quality=0.5, candidates_json="[]"
@@ -167,3 +169,22 @@ def test_unknown_block_is_reported(tmp_path: Path) -> None:
     loader = PromptLoader("ml", override)
     with pytest.raises(PromptError, match="unknown prompt block"):
         loader.render("topic_evaluation", topic="t", goal_json="{}")
+
+
+@pytest.mark.parametrize("key", ["topic_init", "problem_decompose"])
+def test_case_block_is_rendered_only_when_present(key: str) -> None:
+    from idea2hypothesis.stages.base import case_block
+
+    case = {
+        "intent": {"kind": "explain", "text": "Explain why sleep helps recall"},
+        "context": "Pilot study",
+        "references": [{"citation": "Walker 2017"}],
+    }
+    loader = PromptLoader("ml")
+    without = loader.render(key, **{**STAGE_VARIABLES[key], "case_block": case_block(None)})
+    assert "Researcher's case" not in without.user
+    with_case = loader.render(key, **{**STAGE_VARIABLES[key], "case_block": case_block(case)})
+    assert "Researcher's case" in with_case.user
+    assert "Intent (explain a phenomenon): Explain why sleep helps recall" in with_case.user
+    assert "Walker 2017" in with_case.user and "{{" not in with_case.user
+    assert case_block({"intent": {"kind": "test", "text": ""}}) == ""

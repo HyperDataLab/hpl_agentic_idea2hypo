@@ -85,6 +85,7 @@ stages:
       Topic: {{topic}}
       Domains: {{domains}}
       Research constraints: {{constraints}}
+      {{case_block}}
       {{memory_context}}
       {{feedback}}
       {{domain_guidance}}
@@ -160,6 +161,7 @@ stages:
       described test, and must state which part of the goal it serves.
 
       Topic: {{topic}}
+      {{case_block}}
       {{feedback}}
       {{domain_guidance}}
       Goal:

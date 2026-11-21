@@ -6,7 +6,7 @@ from typing import Any
 
 from idea2hypothesis.pipeline.contracts import check_problem_tree, check_topic_evaluation
 from idea2hypothesis.pipeline.models import StageContext
-from idea2hypothesis.stages.base import StageFailure, compact_json, request_json
+from idea2hypothesis.stages.base import StageFailure, case_block, compact_json, request_json
 from idea2hypothesis.stages.topic_init import goal_for_prompt
 from idea2hypothesis.storage.runs import utc_now
 
@@ -44,7 +44,11 @@ async def run(ctx: StageContext) -> list[str]:
     goal_json = compact_json(goal_for_prompt(goal))
 
     prompt = ctx.prompts.render(
-        "problem_decompose", topic=ctx.topic, goal_json=goal_json, feedback=ctx.feedback
+        "problem_decompose",
+        topic=ctx.topic,
+        case_block=case_block(ctx.case),
+        goal_json=goal_json,
+        feedback=ctx.feedback,
     )
     tree, warnings = await request_json(
         ctx, prompt, label="problem_decompose", validate=check_problem_tree

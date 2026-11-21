@@ -38,6 +38,36 @@ def bullet_list(items: tuple[str, ...] | list[str], empty: str = "none") -> str:
     return "; ".join(items) if items else empty
 
 
+_INTENT_LABELS = {
+    "test": "test a claim or hypothesis",
+    "compare": "compare approaches",
+    "explain": "explain a phenomenon",
+    "explore_dataset": "explore a dataset",
+}
+
+
+def case_block(case: dict[str, Any] | None) -> str:
+    """The researcher's own case as a labelled prompt block; empty when none was given.
+
+    Everything here is user-given text. References are citations only, not literature records,
+    and must not be treated as verified or retrieved evidence.
+    """
+    if not case:
+        return ""
+    intent = case.get("intent") or {}
+    lines = ["Researcher's case (given by the researcher; use it, do not treat it as verified):"]
+    if intent.get("text"):
+        kind = _INTENT_LABELS.get(str(intent.get("kind")), str(intent.get("kind", "")))
+        lines.append(f"- Intent ({kind}): {intent['text']}")
+    if case.get("context"):
+        lines.append(f"- Context: {case['context']}")
+    refs = [r.get("citation", "") for r in case.get("references") or [] if r.get("citation")]
+    if refs:
+        lines.append("- References named by the researcher (citations only, not retrieved):")
+        lines += [f"  - {c}" for c in refs]
+    return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
+
 async def request_json(
     ctx: StageContext,
     prompt: RenderedPrompt,

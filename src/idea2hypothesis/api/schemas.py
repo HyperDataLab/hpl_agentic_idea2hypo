@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -40,6 +40,57 @@ class RunSourcesBody(BaseModel):
     )
 
 
+IntentKind = Literal["test", "compare", "explain", "explore_dataset"]
+
+
+class CaseIntent(BaseModel):
+    kind: IntentKind
+    text: str = Field(min_length=12, max_length=500)
+
+    @field_validator("text")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        text = value.strip()
+        if not 12 <= len(text) <= 500:
+            raise ValueError("Intent text must be 12-500 characters")
+        return text
+
+
+class CaseReference(BaseModel):
+    """A citation the researcher gave; plain text, never a literature record."""
+
+    citation: str = Field(min_length=3, max_length=500)
+
+    @field_validator("citation")
+    @classmethod
+    def clean_citation(cls, value: str) -> str:
+        text = value.strip()
+        if not 3 <= len(text) <= 500:
+            raise ValueError("Citation must be 3-500 characters")
+        return text
+
+
+class RunCase(BaseModel):
+    """What the researcher said about the run beyond its topic (optional; holds no secrets)."""
+
+    intent: CaseIntent
+    context: str = Field(default="", max_length=4000)
+    constraints: list[Annotated[str, Field(max_length=500)]] = Field(
+        default_factory=list, max_length=20
+    )
+    references: list[CaseReference] = Field(default_factory=list, max_length=30)
+
+    @field_validator("context")
+    @classmethod
+    def clean_context(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("constraints")
+    @classmethod
+    def clean_constraints(cls, value: list[str]) -> list[str]:
+        return [c.strip() for c in value if c.strip()]
+
+
 class RunCreateRequest(BaseModel):
     platform_run_id: str = Field(
         min_length=1, max_length=128, description="Run id from Platform BE (idempotency key)"
@@ -55,6 +106,9 @@ class RunCreateRequest(BaseModel):
         default=None, description="Run-scoped model settings; default: the configured model"
     )
     sources: RunSourcesBody | None = Field(default=None, description="Lab sources for this run")
+    case: RunCase | None = Field(
+        default=None, description="Intent, context, constraints and references given by the user"
+    )
 
     @field_validator("topic")
     @classmethod

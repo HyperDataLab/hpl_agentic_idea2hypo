@@ -72,7 +72,11 @@ Schemas (`api/schemas.py`):
 
 - `RunCreateRequest`: `platform_run_id` (str), `topic` (12-1000 chars), `domains` (<= 6),
   `review_mode` (`auto|light|copilot|full`, default `copilot`), `budget_usd` (decimal > 0, default
-  `5.00`), `callback_url`.
+  `5.00`), `callback_url`, optional `case` (`intent` {`kind` test|compare|explain|explore_dataset, `text`
+  12-500}, `context` <= 4000, `constraints` <= 20 x 500, `references` <= 30 x {`citation` 3-500}). The case is
+  stored in the run record and config snapshot; its constraints feed `constraints`, and the intent,
+  context and citations reach the `topic_init` and `problem_decompose` prompts as a labelled block
+  (omitted without a case). Citations are the researcher's text, not literature records.
 - `RunCreateResponse`: `popper_run_id` (= engine `run_id`), `status`, `cost_usd`, `message`.
 - `RunStateResponse`: the same plus `last_source_seq`. `status` is one of `running`, `paused`,
   `awaiting_review`, `completed`, `failed`. A cancelled run is reported as `failed` with message
