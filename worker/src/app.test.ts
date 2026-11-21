@@ -180,6 +180,60 @@ describe('public routes', () => {
     expect(runs.logs.get('run-1')?.meta()).toMatchObject({ engineRunId: 'i2h-engine-1', projectId: 'proj-1' });
   });
 
+  describe('the run case', () => {
+    const CASE = {
+      intent: { kind: 'compare', text: 'Compare spaced and massed practice' },
+      context: '  Second-year students  ',
+      constraints: ['Only public datasets', '  ', 'No GPU'],
+      references: [{ citation: ' Cepeda et al. 2006 ' }],
+    };
+    const startWith = (extra: Record<string, unknown>) =>
+      call('/v1/projects/proj-1/runs', {
+        method: 'POST',
+        token: GOOD,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: 'A topic long enough', review_mode: 'copilot', llm: LLM, ...extra }),
+      });
+
+    it('forwards a checked, trimmed case to the engine', async () => {
+      expect((await startWith({ case: CASE })).status).toBe(201);
+      const sent = JSON.parse(String(engineCalls[0]?.init?.body));
+      expect(sent.case).toEqual({
+        intent: { kind: 'compare', text: 'Compare spaced and massed practice' },
+        context: 'Second-year students',
+        constraints: ['Only public datasets', 'No GPU'],
+        references: [{ citation: 'Cepeda et al. 2006' }],
+      });
+    });
+
+    it('keeps old clients working and omits empty parts', async () => {
+      expect((await startWith({})).status).toBe(201);
+      expect('case' in JSON.parse(String(engineCalls[0]?.init?.body))).toBe(false);
+      expect((await startWith({ case: { intent: CASE.intent, context: '', constraints: [], references: [] } })).status).toBe(201);
+      expect(JSON.parse(String(engineCalls[1]?.init?.body)).case).toEqual({ intent: CASE.intent });
+    });
+
+    it.each([
+      ['not an object', 'text'],
+      ['no intent', { context: 'x' }],
+      ['unknown kind', { intent: { kind: 'guess', text: 'x'.repeat(20) } }],
+      ['short intent text', { intent: { kind: 'test', text: 'too short' } }],
+      ['long intent text', { intent: { kind: 'test', text: 'x'.repeat(501) } }],
+      ['long context', { ...CASE, context: 'c'.repeat(4001) }],
+      ['too many constraints', { ...CASE, constraints: Array(21).fill('c') }],
+      ['long constraint', { ...CASE, constraints: ['c'.repeat(501)] }],
+      ['constraints not a list', { ...CASE, constraints: 'c' }],
+      ['short citation', { ...CASE, references: [{ citation: 'ab' }] }],
+      ['too many references', { ...CASE, references: Array(31).fill({ citation: 'abc' }) }],
+      ['reference not an object', { ...CASE, references: ['abc'] }],
+    ])('refuses a bad case: %s', async (_name, bad) => {
+      const response = await startWith({ case: bad });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: 'bad_request' });
+      expect(engineCalls).toHaveLength(0);
+    });
+  });
+
   it('serves state, events and controls through the engine id', async () => {
     await start();
     await internal('/internal/runs/run-1/events', {

@@ -101,6 +101,8 @@ class RunRequest:
     run_id: str | None = None
     platform_run_id: str | None = None
     budget_usd: float | None = None
+    #: The researcher's case (intent, context, constraints, references) as plain data, or ``None``.
+    case: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,8 @@ class StageContext:
     report: Report | None = None
     #: Which execution of the stage this is (0 first; a transient LLM error starts another).
     try_index: int = 0
+    #: The researcher's case from the run record; ``None`` for runs started without one.
+    case: dict[str, Any] | None = None
     role_llms: dict[str, LLMPort] = field(default_factory=dict)
     fulltext: FulltextPort | None = None
 

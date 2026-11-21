@@ -171,6 +171,7 @@ def build_context(
         topic=record["topic"],
         domains=tuple(record.get("domains", [])),
         constraints=tuple(record.get("constraints", [])),
+        case=record.get("case"),
         config=services.config,
         llm=llm or services.llm,
         literature=services.literature,
@@ -290,6 +291,7 @@ async def create_run(request: RunRequest, services: Services) -> str:
     run_id = request.run_id or new_run_id()
     domains = list(request.domains or cfg.research.domains)
     constraints = list(request.constraints or cfg.research.constraints)
+    case = request.case or None
 
     record = {
         "status": RunStatus.RUNNING.value,
@@ -298,6 +300,7 @@ async def create_run(request: RunRequest, services: Services) -> str:
         "topic": topic,
         "domains": domains,
         "constraints": constraints,
+        "case": case,
         "platform_run_id": request.platform_run_id,
         "budget_usd": request.budget_usd,
         "current_stage": None,
@@ -310,7 +313,12 @@ async def create_run(request: RunRequest, services: Services) -> str:
     }
     snapshot = {
         **cfg.snapshot(),
-        "run": {"review_mode": mode, "domains": domains, "constraints": constraints},
+        "run": {
+            "review_mode": mode,
+            "domains": domains,
+            "constraints": constraints,
+            "case": case,
+        },
     }
     services.store.create(
         run_id, record, config_snapshot=snapshot, prompts_snapshot=services.prompts.snapshot()
