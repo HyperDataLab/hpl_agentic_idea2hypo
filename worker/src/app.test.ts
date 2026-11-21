@@ -118,6 +118,16 @@ beforeEach(() => {
       if (path === '/runs') return Response.json({ popper_run_id: 'i2h-engine-1', status: 'running' }, { status: 201 });
       if (path.endsWith('/gates/gate-s05-a1'))
         return Response.json({ detail: { code: 'LLM_KEY_REQUIRED', message: 'send it again' } }, { status: 503 });
+      if (path.endsWith('/resume'))
+        return Response.json(
+          { detail: [
+            { loc: ['body', 'llm', 'role_models', 'reviewer', '[key]'], msg: "Input should be 'theorist', 'judge'", type: 'enum', input: 'sk-secret' },
+            { loc: ['body', 'topic'], msg: 'Field required', type: 'missing', input: 'sk-secret' },
+            { loc: ['body', 'a'], msg: 'm3', type: 't' },
+            { loc: ['body', 'b'], msg: 'm4', type: 't' },
+          ] },
+          { status: 422 },
+        );
       return Response.json({ status: 'running', message: null, cost_usd: null, last_source_seq: 0 });
     },
     paperlab: async (path, init) => {
@@ -270,6 +280,21 @@ describe('public routes', () => {
     });
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: 'LLM_KEY_REQUIRED', message: 'send it again' });
+  });
+
+  it('names the fields of an engine validation error, without the input values', async () => {
+    await start();
+    const response = await call('/v1/projects/proj-1/runs/run-1/resume', {
+      method: 'POST', token: GOOD, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm: LLM }),
+    });
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: 'invalid_request',
+      message: "llm.role_models.reviewer.[key]: Input should be 'theorist', 'judge'; topic: Field required; a: m3",
+    });
+    expect(JSON.stringify(body)).not.toContain('sk-secret');
   });
 
   it('hides a run from another project', async () => {
