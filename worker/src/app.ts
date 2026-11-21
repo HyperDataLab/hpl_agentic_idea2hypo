@@ -110,6 +110,20 @@ async function relay(response: Response): Promise<Response> {
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (response.ok) return json(response.status, body);
   const detail = body.detail;
+  if (Array.isArray(detail)) {
+    // FastAPI validation errors: name the fields, never echo `input` (it can hold the API key).
+    const parts = detail.slice(0, 3).flatMap((item) => {
+      if (typeof item !== 'object' || !item) return [];
+      const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+      const path = (Array.isArray(loc) ? loc : []).map(String).filter((p, i) => !(i === 0 && p === 'body')).join('.');
+      const text = typeof msg === 'string' ? msg : 'invalid';
+      return [path ? `${path}: ${text}` : text];
+    });
+    return json(response.status >= 500 ? 503 : response.status, {
+      error: 'invalid_request',
+      message: parts.join('; ') || `engine answered ${response.status}`,
+    });
+  }
   const code =
     typeof detail === 'object' && detail && 'code' in detail ? String((detail as { code: unknown }).code) : 'engine_error';
   const message =
