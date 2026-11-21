@@ -104,6 +104,11 @@ route that names a run missing from disk fetches it back first (`RunService.loca
    `npm ci`; once, `npx wrangler d1 create i2h` and put its `database_id` in `wrangler.toml`;
    `npx wrangler d1 migrations apply i2h --remote` (again after a new migration);
    `npx wrangler secret put ENGINE_KEY` (and `S2_API_KEY` if any), `npx wrangler deploy`.
+   Without Docker on the machine, deploy through GitHub Actions instead (`.github/workflows/deploy-engine.yml`):
+   once, add the repository secret `CLOUDFLARE_API_TOKEN` (HyperDataLab account; Workers Scripts, Containers,
+   D1 and Workers R2 Storage edit). Then, on "Deploy now", push `main` to `deploy/engine`
+   (`git push origin origin/main:refs/heads/deploy/engine`) or run the workflow by hand. It refuses a commit
+   whose `ci` run did not succeed, runs the Worker tests, applies D1 migrations, builds the image and deploys.
 4. App: build the static export of `hpl_agentic_platform_fe` with `NEXT_PUBLIC_I2H_WORKER_URL` and
    deploy Hosting from that repo.
 
